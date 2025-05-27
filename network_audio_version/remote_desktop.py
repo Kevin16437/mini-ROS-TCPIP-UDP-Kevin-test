@@ -47,6 +47,11 @@ class RemoteDesktop:
         # 控制相关
         self.control_enabled = True
         self.mouse_pos = (0, 0)
+        self.last_mouse_pos = (0, 0)  # 上次鼠标位置
+        self.last_move_time = 0  # 上次移动命令发送时间
+        self.move_threshold = 3  # 鼠标移动阈值（像素）
+        self.move_interval = 0.05  # 移动命令发送间隔（秒）
+        self.is_dragging = False  # 是否正在拖拽
         
         # 音频相关
         self.chunk_size = 1024
@@ -193,11 +198,15 @@ class RemoteDesktop:
         self.video_label.pack(fill=self.tk.BOTH, expand=True)
         
         # 绑定鼠标事件
-        self.video_label.bind('<Motion>', self.on_mouse_move)
-        self.video_label.bind('<Button-1>', self.on_mouse_click)
+        # 只在按下鼠标时才跟踪移动，避免无意义的移动命令
+        self.video_label.bind('<Button-1>', self.on_mouse_press)
+        self.video_label.bind('<ButtonRelease-1>', self.on_mouse_release)
         self.video_label.bind('<Double-Button-1>', self.on_mouse_double_click)
         self.video_label.bind('<Button-3>', lambda e: self.on_mouse_click(e, 'right'))
         self.video_label.bind('<B1-Motion>', self.on_mouse_drag)
+        # 只在需要时处理移动事件
+        self.video_label.bind('<Enter>', self.on_mouse_enter)
+        self.video_label.bind('<Leave>', self.on_mouse_leave)
         
         # 控制面板
         control_frame = self.ttk.Frame(self.root)
@@ -393,8 +402,11 @@ class RemoteDesktop:
             
     def handle_control_commands(self):
         """处理控制命令（服务端模式）"""
-        self.control_socket.settimeout(0.5)
+        self.control_socket.settimeout(0.1)  # 减少超时时间，提高响应性
         buffer_size = 1024
+        last_move_time = 0
+        last_move_pos = (0, 0)
+        move_smoothing = 0.02  # 移动平滑间隔
         
         print("开始监听鼠标控制命令...")
         
@@ -411,23 +423,51 @@ class RemoteDesktop:
                 screen_x = int(x * self.screen_size[0] / 1024)
                 screen_y = int(y * self.screen_size[1] / 576)
                 
-                print(f"收到控制命令: {command_type} 坐标: ({x}, {y}) -> 屏幕: ({screen_x}, {screen_y})")
+                # 限制坐标范围
+                screen_x = max(0, min(screen_x, self.screen_size[0] - 1))
+                screen_y = max(0, min(screen_y, self.screen_size[1] - 1))
+                
+                current_time = time.time()
                 
                 # 执行鼠标操作
                 try:
                     if command_type == 'move':
-                        pyautogui.moveTo(screen_x, screen_y)
+                        # 对移动命令进行平滑处理，避免过于频繁的移动
+                        if (current_time - last_move_time >= move_smoothing or
+                            abs(screen_x - last_move_pos[0]) > 10 or
+                            abs(screen_y - last_move_pos[1]) > 10):
+                            
+                            pyautogui.moveTo(screen_x, screen_y, duration=0)
+                            last_move_time = current_time
+                            last_move_pos = (screen_x, screen_y)
+                            
                     elif command_type == 'click':
                         button = command.get('button', 'left')
+                        # 确保鼠标在正确位置后再点击
+                        pyautogui.moveTo(screen_x, screen_y, duration=0)
+                        time.sleep(0.01)  # 短暂延迟确保移动完成
                         pyautogui.click(screen_x, screen_y, button=button)
+                        print(f"点击: ({screen_x}, {screen_y}) 按钮: {button}")
+                        
                     elif command_type == 'double_click':
+                        pyautogui.moveTo(screen_x, screen_y, duration=0)
+                        time.sleep(0.01)
                         pyautogui.doubleClick(screen_x, screen_y)
+                        print(f"双击: ({screen_x}, {screen_y})")
+                        
                     elif command_type == 'drag':
                         end_x = command.get('end_x', x)
                         end_y = command.get('end_y', y)
                         screen_end_x = int(end_x * self.screen_size[0] / 1024)
                         screen_end_y = int(end_y * self.screen_size[1] / 576)
-                        pyautogui.dragTo(screen_end_x, screen_end_y, duration=0.1)
+                        
+                        # 限制坐标范围
+                        screen_end_x = max(0, min(screen_end_x, self.screen_size[0] - 1))
+                        screen_end_y = max(0, min(screen_end_y, self.screen_size[1] - 1))
+                        
+                        pyautogui.dragTo(screen_end_x, screen_end_y, duration=0.05)
+                        print(f"拖拽: ({screen_x}, {screen_y}) -> ({screen_end_x}, {screen_end_y})")
+                        
                 except Exception as e:
                     print(f"执行控制命令错误: {e}")
                 
@@ -538,50 +578,135 @@ class RemoteDesktop:
             
         try:
             data = json.dumps(command).encode('utf-8')
+            # 使用非阻塞发送，避免网络延迟影响界面响应
             self.control_socket.sendto(data, (self.host, self.control_port))
         except Exception as e:
             print(f"发送控制命令错误: {e}")
+            # 如果发送失败，更新状态
+            if hasattr(self, 'update_status'):
+                self.update_status(f"控制命令发送失败: {e}")
             
     def on_mouse_move(self, event):
         """处理鼠标移动事件（客户端模式）"""
+        current_time = time.time()
+        current_pos = (event.x, event.y)
+        
+        # 计算移动距离
+        dx = abs(current_pos[0] - self.last_mouse_pos[0])
+        dy = abs(current_pos[1] - self.last_mouse_pos[1])
+        distance = (dx * dx + dy * dy) ** 0.5
+        
+        # 只有移动距离超过阈值且时间间隔足够时才发送命令
+        if (distance >= self.move_threshold and 
+            current_time - self.last_move_time >= self.move_interval):
+            
+            self.mouse_pos = current_pos
+            self.last_mouse_pos = current_pos
+            self.last_move_time = current_time
+            
+            command = {
+                'type': 'move',
+                'x': event.x,
+                'y': event.y
+            }
+            self.send_command(command)
+        
+    def on_mouse_press(self, event):
+        """处理鼠标按下事件（客户端模式）"""
+        self.is_dragging = False
         self.mouse_pos = (event.x, event.y)
-        command = {
+        self.last_mouse_pos = (event.x, event.y)
+        
+        # 先移动到点击位置，然后点击
+        move_command = {
             'type': 'move',
             'x': event.x,
             'y': event.y
+        }
+        self.send_command(move_command)
+        
+        # 稍微延迟后发送点击命令
+        self.root.after(10, lambda: self.send_click_command(event.x, event.y))
+        
+    def on_mouse_release(self, event):
+        """处理鼠标释放事件（客户端模式）"""
+        if not self.is_dragging:
+            # 如果不是拖拽，这是一个普通点击的释放
+            pass
+        self.is_dragging = False
+        
+    def send_click_command(self, x, y):
+        """发送点击命令"""
+        command = {
+            'type': 'click',
+            'x': x,
+            'y': y,
+            'button': 'left'
         }
         self.send_command(command)
         
     def on_mouse_click(self, event, button='left'):
         """处理鼠标点击事件（客户端模式）"""
-        command = {
+        # 先移动到点击位置
+        move_command = {
+            'type': 'move',
+            'x': event.x,
+            'y': event.y
+        }
+        self.send_command(move_command)
+        
+        # 稍微延迟后发送点击命令
+        self.root.after(10, lambda: self.send_command({
             'type': 'click',
             'x': event.x,
             'y': event.y,
             'button': button
-        }
-        self.send_command(command)
+        }))
         
     def on_mouse_double_click(self, event):
         """处理鼠标双击事件（客户端模式）"""
-        command = {
-            'type': 'double_click',
+        # 先移动到双击位置
+        move_command = {
+            'type': 'move',
             'x': event.x,
             'y': event.y
         }
-        self.send_command(command)
+        self.send_command(move_command)
+        
+        # 稍微延迟后发送双击命令
+        self.root.after(10, lambda: self.send_command({
+            'type': 'double_click',
+            'x': event.x,
+            'y': event.y
+        }))
         
     def on_mouse_drag(self, event):
         """处理鼠标拖动事件（客户端模式）"""
-        command = {
-            'type': 'drag',
-            'x': self.mouse_pos[0],
-            'y': self.mouse_pos[1],
-            'end_x': event.x,
-            'end_y': event.y
-        }
-        self.send_command(command)
-        self.mouse_pos = (event.x, event.y)
+        self.is_dragging = True
+        current_time = time.time()
+        
+        # 限制拖拽命令的发送频率
+        if current_time - self.last_move_time >= self.move_interval:
+            command = {
+                'type': 'drag',
+                'x': self.mouse_pos[0],
+                'y': self.mouse_pos[1],
+                'end_x': event.x,
+                'end_y': event.y
+            }
+            self.send_command(command)
+            self.mouse_pos = (event.x, event.y)
+            self.last_move_time = current_time
+            
+    def on_mouse_enter(self, event):
+        """鼠标进入窗口事件"""
+        # 绑定移动事件
+        self.video_label.bind('<Motion>', self.on_mouse_move)
+        
+    def on_mouse_leave(self, event):
+        """鼠标离开窗口事件"""
+        # 解绑移动事件，避免不必要的命令
+        self.video_label.unbind('<Motion>')
         
     def receive_screen(self):
         """接收屏幕图像（客户端模式）"""
