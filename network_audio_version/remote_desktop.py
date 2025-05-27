@@ -17,9 +17,6 @@ import json
 import time
 import argparse
 import sys
-import tkinter as tk
-from tkinter import ttk
-from PIL import Image, ImageTk
 
 class RemoteDesktop:
     def __init__(self, mode='server', host='0.0.0.0', screen_port=8485, control_port=8486, audio_port=8487):
@@ -170,6 +167,15 @@ class RemoteDesktop:
         
     def setup_gui(self):
         """设置GUI界面（仅客户端模式）"""
+        import tkinter as tk
+        from tkinter import ttk
+        from PIL import Image, ImageTk
+        
+        # 将tkinter模块保存为实例变量，以便其他方法使用
+        self.tk = tk
+        self.ttk = ttk
+        self.ImageTk = ImageTk
+        
         self.root = tk.Tk()
         self.root.title(f"远程桌面客户端 - 连接到: {self.host}")
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -179,12 +185,12 @@ class RemoteDesktop:
         self.root.geometry(f"{width}x{height+100}")
         
         # 主框架
-        main_frame = ttk.Frame(self.root)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        main_frame = self.ttk.Frame(self.root)
+        main_frame.pack(fill=self.tk.BOTH, expand=True, padx=10, pady=10)
         
         # 视频显示区域
-        self.video_label = tk.Label(main_frame, bg="black")
-        self.video_label.pack(fill=tk.BOTH, expand=True)
+        self.video_label = self.tk.Label(main_frame, bg="black")
+        self.video_label.pack(fill=self.tk.BOTH, expand=True)
         
         # 绑定鼠标事件
         self.video_label.bind('<Motion>', self.on_mouse_move)
@@ -194,38 +200,38 @@ class RemoteDesktop:
         self.video_label.bind('<B1-Motion>', self.on_mouse_drag)
         
         # 控制面板
-        control_frame = ttk.Frame(self.root)
-        control_frame.pack(fill=tk.X, padx=10, pady=5)
+        control_frame = self.ttk.Frame(self.root)
+        control_frame.pack(fill=self.tk.X, padx=10, pady=5)
         
         # 鼠标控制开关
-        self.control_var = tk.BooleanVar(value=True)
-        control_check = ttk.Checkbutton(
+        self.control_var = self.tk.BooleanVar(value=True)
+        control_check = self.ttk.Checkbutton(
             control_frame, 
             text="鼠标控制", 
             variable=self.control_var,
             command=self.toggle_control
         )
-        control_check.pack(side=tk.LEFT, padx=5)
+        control_check.pack(side=self.tk.LEFT, padx=5)
         
         # 麦克风控制
-        self.mute_var = tk.BooleanVar(value=False)
-        self.mute_button = ttk.Checkbutton(
+        self.mute_var = self.tk.BooleanVar(value=False)
+        self.mute_button = self.ttk.Checkbutton(
             control_frame,
             text="静音麦克风",
             variable=self.mute_var,
             command=self.toggle_mute
         )
-        self.mute_button.pack(side=tk.LEFT, padx=5)
+        self.mute_button.pack(side=self.tk.LEFT, padx=5)
         
         # 状态栏
-        status_frame = ttk.Frame(self.root)
-        status_frame.pack(fill=tk.X, padx=10, pady=5)
+        status_frame = self.ttk.Frame(self.root)
+        status_frame.pack(fill=self.tk.X, padx=10, pady=5)
         
-        self.status_label = ttk.Label(status_frame, text="未连接")
-        self.status_label.pack(side=tk.LEFT)
+        self.status_label = self.ttk.Label(status_frame, text="未连接")
+        self.status_label.pack(side=self.tk.LEFT)
         
-        self.fps_label = ttk.Label(status_frame, text="FPS: 0")
-        self.fps_label.pack(side=tk.RIGHT)
+        self.fps_label = self.ttk.Label(status_frame, text="FPS: 0")
+        self.fps_label.pack(side=self.tk.RIGHT)
         
     def setup_audio_streams(self):
         """设置音频流"""
@@ -629,12 +635,14 @@ class RemoteDesktop:
     def update_display(self, frame):
         """更新显示的图像（客户端模式）"""
         try:
+            from PIL import Image
+            
             # 转换颜色空间
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             
             # 转换为PIL图像
             image = Image.fromarray(frame)
-            photo = ImageTk.PhotoImage(image=image)
+            photo = self.ImageTk.PhotoImage(image=image)
             
             # 更新标签
             if self.video_label:
@@ -731,11 +739,21 @@ if __name__ == "__main__":
         import numpy
         import pyaudio
         import pyautogui
-        from PIL import Image, ImageTk
+        
+        # 只在客户端模式下检查GUI依赖
+        if args.mode == 'client':
+            from PIL import Image, ImageTk
+            import tkinter
+            
     except ImportError as e:
         print(f"缺少必要的依赖: {e}")
-        print("请安装所需的依赖:")
-        print("  pip install opencv-python numpy pyaudio pyautogui pillow")
+        if args.mode == 'client':
+            print("请安装所需的依赖:")
+            print("  pip install opencv-python numpy pyaudio pyautogui pillow")
+            print("  brew install python-tk  # 用于GUI支持")
+        else:
+            print("请安装所需的依赖:")
+            print("  pip install opencv-python numpy pyaudio pyautogui")
         sys.exit(1)
     
     if args.mode == 'server':
