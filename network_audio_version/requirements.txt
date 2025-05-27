@@ -1,0 +1,5 @@
+opencv-python>=4.5.0
+numpy>=1.19.0
+PyAutoGUI>=0.9.50
+pyaudio>=0.2.11
+pillow>=8.0.0
